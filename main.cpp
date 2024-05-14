@@ -4,6 +4,8 @@
 #include <webgpu/webgpu.h>
 #include <cassert>
 #include <vector>
+#define WEBGPU_CPP_IMPLEMENTATION
+#include <webgpu/webgpu.hpp>
 
 
 WGPUAdapter requestAdapter(WGPUInstance instance, WGPURequestAdapterOptions const* options) {
@@ -83,11 +85,9 @@ int main(int,char**)
         return 1;
     }
 
+    wgpu::InstanceDescriptor desc = {};
 
-    WGPUInstanceDescriptor desc = {};
-    desc.nextInChain = nullptr;
-
-    WGPUInstance instance = wgpuCreateInstance(&desc);
+    wgpu::Instance instance = wgpu::createInstance(desc);
     if (!instance) 
     {
         std::cerr << "Could not initialize WebGPU!" << std::endl;
@@ -98,15 +98,18 @@ int main(int,char**)
 
     std::cout << "Requesting adapter..." << std::endl;
 
-    WGPUSurface surface = glfwGetWGPUSurface(instance, window);
+    wgpu::Surface surface = glfwGetWGPUSurface(instance, window);
 
-    WGPURequestAdapterOptions adapterOptions = {};
-    adapterOptions.nextInChain = nullptr;
+    wgpu::RequestAdapterOptions adapterOptions = {};
     adapterOptions.compatibleSurface = surface;
-    WGPUAdapter adapter = requestAdapter(instance, &adapterOptions);
+    wgpu::Adapter adapter = requestAdapter(instance, &adapterOptions);
 
     std::cout << "Got adapter: " << adapter << std::endl;
 
+    // Is something missing here??
+        // Why doesn't this work??
+        // Huh??
+        // PR opportunity??
     std::vector<WGPUFeatureName> features;
     size_t featureCount = wgpuAdapterEnumerateFeatures(adapter, nullptr);
     features.resize(featureCount);
@@ -120,14 +123,13 @@ int main(int,char**)
 
     std::cout << "Requesting device..." << std::endl;
 
-    WGPUDeviceDescriptor deviceDesc = {};
-    deviceDesc.nextInChain = nullptr;
+    wgpu::DeviceDescriptor deviceDesc = {};
     deviceDesc.label = "My Device";
     deviceDesc.requiredFeaturesCount = 0;
     deviceDesc.requiredLimits = nullptr;
     deviceDesc.defaultQueue.nextInChain = nullptr;
     deviceDesc.defaultQueue.label = "The default queue";
-    WGPUDevice device = requestDevice(adapter, &deviceDesc);
+    wgpu::Device device = adapter.requestDevice(deviceDesc);
 
     std::cout << "Got device: " << device << std::endl;
 
@@ -139,17 +141,86 @@ int main(int,char**)
     wgpuDeviceSetUncapturedErrorCallback(device, onDeviceError, nullptr);
 
 
+    wgpu::Queue queue = device.getQueue();
+
+    auto onQueueWorkDone = [](WGPUQueueWorkDoneStatus status, void*) {
+        std::cout << "Queued work finished with status: " << status << std::endl;
+    };
+
+    wgpuQueueOnSubmittedWorkDone(queue, onQueueWorkDone, nullptr);
+
+    wgpu::SwapChainDescriptor swapChainDesc = {};
+    swapChainDesc.width = 640;
+    swapChainDesc.height = 480;
+    swapChainDesc.format = wgpuSurfaceGetPreferredFormat(surface, adapter);
+    swapChainDesc.usage = WGPUTextureUsage_RenderAttachment;
+    swapChainDesc.presentMode = WGPUPresentMode_Fifo;
+    wgpu::SwapChain swapChain = device.createSwapChain(surface, swapChainDesc);
+    std::cout << "Swapchain: " << swapChain << std::endl;
+
+
     while (!glfwWindowShouldClose(window)) 
     {
-
-
         glfwPollEvents();
-    }
 
-    wgpuDeviceRelease(device);
-    wgpuAdapterRelease(adapter);
-    wgpuSurfaceRelease(surface);
-    wgpuInstanceRelease(instance);
+        wgpu::TextureView nextTexture = swapChain.getCurrentTextureView();
+        if (!nextTexture) {
+            std::cerr << "Cannot acquire next swap chain texture" << std::endl;
+            break;
+        }
+        std::cout << "nextTexture: " << nextTexture << std::endl;
+
+        // My guess of what is happening is that we create a command
+        // encoder and then begin a render pass using that encoder
+        // we then end the render pass without doing anything (so it just clears the screen)
+        // we then convert this into a command
+        // we then queue this command, which is what actually gets drawn by the GPU
+
+        wgpu::CommandEncoderDescriptor commandEncoderDesc = {};
+        commandEncoderDesc.label = "Command Encoder";
+        wgpu::CommandEncoder encoder = device.createCommandEncoder(commandEncoderDesc);
+
+        wgpu::RenderPassDescriptor renderPassDesc = {};
+        
+
+        wgpu::RenderPassColorAttachment renderPassColorAttachment = {};
+        renderPassColorAttachment.view = nextTexture;
+        renderPassColorAttachment.resolveTarget = nullptr;
+        renderPassColorAttachment.loadOp = WGPULoadOp_Clear;
+        renderPassColorAttachment.storeOp = WGPUStoreOp_Store;
+        renderPassColorAttachment.clearValue = wgpu::Color{ 0.9, 0.1, 0.2, 1.0 };
+
+
+        renderPassDesc.colorAttachmentCount = 1;
+        renderPassDesc.colorAttachments = &renderPassColorAttachment;
+        renderPassDesc.depthStencilAttachment = nullptr;
+        renderPassDesc.timestampWriteCount = 0;
+        renderPassDesc.timestampWrites = nullptr;
+
+
+        wgpu::RenderPassEncoder renderPass = encoder.beginRenderPass(renderPassDesc);
+        
+        renderPass.end();
+        renderPass.release();
+
+        nextTexture.release();
+        
+        wgpu::CommandBufferDescriptor cmdBufferDescriptor = {};
+        cmdBufferDescriptor.label = "command buffer";
+        wgpu::CommandBuffer command = encoder.finish(cmdBufferDescriptor);
+        encoder.release();
+        queue.submit(1, &command);
+        command.release();
+
+        swapChain.present();
+    }
+    swapChain.release();
+    queue.release();
+    device.release();
+    adapter.release();
+    surface.release();
+    instance.release();
+
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;

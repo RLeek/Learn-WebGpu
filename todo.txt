@@ -1,0 +1,4 @@
+List of things to investigate/fix:
+- https://eliemichel.github.io/LearnWebGPU/getting-started/first-color.html 
+	- Has a few spelling errors and awkard spellings (The number of attachment is variable)
+- Figure out if WGPUFeatureName binding is broken/doesn't exist (C++ wrapper) 

@@ -13,4 +13,7 @@
       <UniqueIdentifier>{06303FC6-8BB1-361F-822B-C2FB8C0619E4}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
+  <ItemGroup>
+    <Text Include="todo.txt" />
+  </ItemGroup>
 </Project>
