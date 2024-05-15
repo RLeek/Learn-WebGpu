@@ -8,6 +8,27 @@
 #include <webgpu/webgpu.hpp>
 
 
+const char* shaderSource = R"(
+@vertex
+fn vs_main(@builtin(vertex_index) in_vertex_index:u32) -> @builtin(position) vec4f {
+    var p = vec2f(0.0, 0.0);
+    if (in_vertex_index == 0u) {
+        p = vec2f(-0.5, -0.5);
+    } else if (in_vertex_index == 1u) {
+        p = vec2f(0.5, -0.5);
+    } else {
+        p = vec2f(0.0, 0.5);
+    }
+    return vec4f(p, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4f {
+    return vec4f(0.0, 0.4, 1.0, 1.0);
+}
+)";
+
+
 WGPUAdapter requestAdapter(WGPUInstance instance, WGPURequestAdapterOptions const* options) {
     struct UserData {
         WGPUAdapter adapter = nullptr;
@@ -122,7 +143,6 @@ int main(int,char**)
     }
 
     std::cout << "Requesting device..." << std::endl;
-
     wgpu::DeviceDescriptor deviceDesc = {};
     deviceDesc.label = "My Device";
     deviceDesc.requiredFeaturesCount = 0;
@@ -130,7 +150,6 @@ int main(int,char**)
     deviceDesc.defaultQueue.nextInChain = nullptr;
     deviceDesc.defaultQueue.label = "The default queue";
     wgpu::Device device = adapter.requestDevice(deviceDesc);
-
     std::cout << "Got device: " << device << std::endl;
 
     auto onDeviceError = [](WGPUErrorType type, char const* message, void*) {
@@ -141,6 +160,17 @@ int main(int,char**)
     wgpuDeviceSetUncapturedErrorCallback(device, onDeviceError, nullptr);
 
 
+    std::cout << "Allocating GPU memory..." << std::endl;
+
+    wgpu::BufferDescriptor bufferDesc;
+    bufferDesc.label = "Some GPU-side data buffer";
+    bufferDesc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::CopySrc;
+    bufferDesc.size = 16;
+    bufferDesc.mappedAtCreation = false;
+    wgpu::Buffer buffer1 = device.createBuffer(bufferDesc);
+    bufferDesc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+    wgpu::Buffer buffer2 = device.createBuffer(bufferDesc);
+
     wgpu::Queue queue = device.getQueue();
 
     auto onQueueWorkDone = [](WGPUQueueWorkDoneStatus status, void*) {
@@ -149,18 +179,131 @@ int main(int,char**)
 
     wgpuQueueOnSubmittedWorkDone(queue, onQueueWorkDone, nullptr);
 
+    std::cout << "Uploading data to the GPU..." << std::endl;
+
+    std::vector<uint8_t> numbers(16);
+    for (uint8_t i = 0; i < 16; ++i) numbers[i] = i;
+    queue.writeBuffer(buffer1, 0, numbers.data(), numbers.size());
+    std::cout << "Sending buffer copy operation..." << std::endl;
+
+    wgpu::CommandEncoderDescriptor commandEncoderDesc = {};
+    commandEncoderDesc.label = "Command Encoder";
+    wgpu::CommandEncoder encoder = device.createCommandEncoder(commandEncoderDesc);
+
+    encoder.copyBufferToBuffer(buffer1, 0, buffer2, 0, 16);
+    wgpu::CommandBuffer command = encoder.finish(wgpu::CommandBufferDescriptor{});
+    encoder.release();
+    queue.submit(1, &command);
+    command.release();
+
+
+
+
     wgpu::SwapChainDescriptor swapChainDesc = {};
     swapChainDesc.width = 640;
     swapChainDesc.height = 480;
-    swapChainDesc.format = wgpuSurfaceGetPreferredFormat(surface, adapter);
-    swapChainDesc.usage = WGPUTextureUsage_RenderAttachment;
-    swapChainDesc.presentMode = WGPUPresentMode_Fifo;
+    swapChainDesc.format = surface.getPreferredFormat(adapter);
+    swapChainDesc.usage = wgpu::TextureUsage::RenderAttachment;
+    swapChainDesc.presentMode = wgpu::PresentMode::Fifo;
     wgpu::SwapChain swapChain = device.createSwapChain(surface, swapChainDesc);
     std::cout << "Swapchain: " << swapChain << std::endl;
 
 
+
+    // None of this is relevant for this one
+
+    // Create shader module
+    wgpu::ShaderModuleDescriptor shaderDesc;
+    shaderDesc.hintCount = 0;
+    shaderDesc.hints = nullptr;
+
+    wgpu::ShaderModuleWGSLDescriptor shaderCodeDesc;
+    shaderCodeDesc.chain.next = nullptr;
+    shaderCodeDesc.chain.sType = wgpu::SType::ShaderModuleWGSLDescriptor;
+    shaderCodeDesc.code = shaderSource;
+    shaderDesc.nextInChain = &shaderCodeDesc.chain;
+    wgpu::ShaderModule shaderModule = device.createShaderModule(shaderDesc);
+
+    // begin renering here
+    wgpu::RenderPipelineDescriptor pipelineDesc;
+    // define vertex shader
+    pipelineDesc.vertex.bufferCount = 0;
+    pipelineDesc.vertex.buffers = nullptr;
+    pipelineDesc.vertex.module = shaderModule;
+    pipelineDesc.vertex.entryPoint = "vs_main";
+    pipelineDesc.vertex.constantCount = 0;
+    pipelineDesc.vertex.constants = nullptr;
+    // define rasterization
+    pipelineDesc.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
+    pipelineDesc.primitive.stripIndexFormat = wgpu::IndexFormat::Undefined;
+    pipelineDesc.primitive.frontFace = wgpu::FrontFace::CCW;
+    pipelineDesc.primitive.cullMode = wgpu::CullMode::None;
+    // define fragment shader
+    wgpu::FragmentState fragmentState;
+    fragmentState.module = shaderModule;
+    fragmentState.entryPoint = "fs_main";
+    fragmentState.constantCount = 0;
+    fragmentState.constants = nullptr;
+    pipelineDesc.fragment = &fragmentState;
+    // define stencil/depth test
+    pipelineDesc.depthStencil = nullptr;
+    // define blending
+    wgpu::BlendState blendState;
+    blendState.color.srcFactor = wgpu::BlendFactor::SrcAlpha;
+    blendState.color.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
+    blendState.color.operation = wgpu::BlendOperation::Add;
+    blendState.alpha.srcFactor = wgpu::BlendFactor::Zero;
+    blendState.alpha.dstFactor = wgpu::BlendFactor::One;
+    blendState.alpha.operation = wgpu::BlendOperation::Add;
+    wgpu::ColorTargetState colorTarget;
+    wgpu::TextureFormat swapChainFormat = surface.getPreferredFormat(adapter);
+    colorTarget.format = swapChainFormat; //????
+    colorTarget.blend = &blendState;
+    colorTarget.writeMask = wgpu::ColorWriteMask::All;
+
+    fragmentState.targetCount = 1;
+    fragmentState.targets = &colorTarget;
+
+    pipelineDesc.multisample.count = 1;
+    pipelineDesc.multisample.mask = ~0u;
+    pipelineDesc.multisample.alphaToCoverageEnabled = false;
+
+    pipelineDesc.label = nullptr;
+
+    wgpu::RenderPipeline pipeline = device.createRenderPipeline(pipelineDesc);
+
+    // None of this is relevant for this one
+
+
+
+
+    struct Context {
+        wgpu::Buffer buffer;
+    };
+
+    auto onBuffer2Mapped = [](WGPUBufferMapAsyncStatus status, void* pUserData) {
+        Context* context = reinterpret_cast<Context*>(pUserData);
+        std::cout << "Buffer 2 mapped with status " << status << std::endl;
+        if (status != wgpu::BufferMapAsyncStatus::Success) return;
+        uint8_t* bufferData = (uint8_t*)context->buffer.getConstMappedRange(0, 16);
+
+        std::cout << "bufferData = [";
+        for (int i = 0;i < 16; ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << bufferData[i];
+        }
+        std::cout << "]" << std::endl;
+
+        context->buffer.unmap();
+    };
+
+    Context context = { buffer2 };
+    wgpuBufferMapAsync(buffer2, wgpu::MapMode::Read, 0, 16, onBuffer2Mapped, (void*)&context);
+
     while (!glfwWindowShouldClose(window)) 
     {
+        queue.submit(0, nullptr);
+
         glfwPollEvents();
 
         wgpu::TextureView nextTexture = swapChain.getCurrentTextureView();
@@ -169,16 +312,6 @@ int main(int,char**)
             break;
         }
         std::cout << "nextTexture: " << nextTexture << std::endl;
-
-        // My guess of what is happening is that we create a command
-        // encoder and then begin a render pass using that encoder
-        // we then end the render pass without doing anything (so it just clears the screen)
-        // we then convert this into a command
-        // we then queue this command, which is what actually gets drawn by the GPU
-
-        wgpu::CommandEncoderDescriptor commandEncoderDesc = {};
-        commandEncoderDesc.label = "Command Encoder";
-        wgpu::CommandEncoder encoder = device.createCommandEncoder(commandEncoderDesc);
 
         wgpu::RenderPassDescriptor renderPassDesc = {};
         
@@ -198,8 +331,19 @@ int main(int,char**)
         renderPassDesc.timestampWrites = nullptr;
 
 
+        commandEncoderDesc = {};
+        commandEncoderDesc.label = "Command Encoder";
+        encoder = device.createCommandEncoder(commandEncoderDesc);
+
+
         wgpu::RenderPassEncoder renderPass = encoder.beginRenderPass(renderPassDesc);
         
+
+        renderPass.setPipeline(pipeline);
+
+        // Not sure I understand how this gets mapped to wlsl
+        renderPass.draw(3, 1, 0, 0);
+
         renderPass.end();
         renderPass.release();
 
@@ -207,13 +351,18 @@ int main(int,char**)
         
         wgpu::CommandBufferDescriptor cmdBufferDescriptor = {};
         cmdBufferDescriptor.label = "command buffer";
-        wgpu::CommandBuffer command = encoder.finish(cmdBufferDescriptor);
+        command = encoder.finish(cmdBufferDescriptor);
         encoder.release();
         queue.submit(1, &command);
         command.release();
 
         swapChain.present();
-    }
+    }        
+    buffer1.destroy();
+    buffer2.destroy();
+    buffer1.release();
+    buffer2.release();
+
     swapChain.release();
     queue.release();
     device.release();
